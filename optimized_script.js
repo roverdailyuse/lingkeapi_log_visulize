@@ -513,6 +513,15 @@
                     <button id="btn-clear" class="u-btn btn-danger" style="margin-left:auto;">清空</button>
                 </div>
 
+                <!-- 外层时间范围选取 -->
+                <div class="ctrl-bar" id="date-ctrl-bar" style="margin-top: -5px;">
+                    <span style="font-size:12px; font-weight:bold; color:#555;">外层时间范围:</span>
+                    <input type="datetime-local" id="sel-start-date" class="u-btn" style="width: 180px;">
+                    <span>至</span>
+                    <input type="datetime-local" id="sel-end-date" class="u-btn" style="width: 180px;">
+                    <button id="btn-reset-date" class="u-btn">重置时间</button>
+                </div>
+
                 <div class="dash-row">
                     <div id="main-chart" class="chart-area"></div>
                     <div class="side-panel">
@@ -576,9 +585,15 @@
             }
         };
 
-        ['sel-y-scale', 'sel-precision', 'sel-type-chart'].forEach(id => {
+        ['sel-y-scale', 'sel-precision', 'sel-type-chart', 'sel-start-date', 'sel-end-date'].forEach(id => {
             document.getElementById(id).onchange = updateChart;
         });
+
+        document.getElementById('btn-reset-date').onclick = () => {
+            document.getElementById('sel-start-date').value = '';
+            document.getElementById('sel-end-date').value = '';
+            updateChart();
+        };
 
         await scrapeData();
         updateMultiSelectData(allStoredData);
@@ -596,7 +611,15 @@
         const yScaleType = document.getElementById('sel-y-scale').value; // 'value' or 'log'
         const followRecording = document.getElementById('chk-follow').checked;
 
-        updateMultiSelectData(allStoredData);
+        const startDateVal = document.getElementById('sel-start-date').value;
+        const endDateVal = document.getElementById('sel-end-date').value;
+        const startTs = startDateVal ? new Date(startDateVal).getTime() : 0;
+        const endTs = endDateVal ? new Date(endDateVal).getTime() : Infinity;
+
+        // 1. 外层时间过滤
+        const timeFilteredData = allStoredData.filter(d => d.ts >= startTs && d.ts <= endTs);
+
+        updateMultiSelectData(timeFilteredData);
 
         // 辅助检查函数，空集合代表全选
         const isSelected = (key, val) => {
@@ -604,8 +627,8 @@
             return selectedSet.size === 0 || selectedSet.has(val);
         };
 
-        // 应用过滤
-        const filtered = allStoredData.filter(d => {
+        // 2. 应用属性过滤
+        const filtered = timeFilteredData.filter(d => {
             if (!isSelected('token_name', d.token_name)) return false;
             if (!isSelected('model', d.model)) return false;
             if (!isSelected('group', d.group)) return false;
