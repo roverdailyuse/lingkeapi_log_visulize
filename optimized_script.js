@@ -20,6 +20,71 @@
     let isRecording = false;
     let recordingStartTime = 0;
 
+    // --- IndexedDB 封装 ---
+    const DB_NAME = 'LingkeApiLogsDB';
+    const DB_VERSION = 1;
+    const STORE_NAME = 'logs';
+
+    const dbPromise = new Promise((resolve, reject) => {
+        const request = indexedDB.open(DB_NAME, DB_VERSION);
+        request.onerror = event => reject("IndexedDB error: " + event.target.errorCode);
+        request.onsuccess = event => resolve(event.target.result);
+        request.onupgradeneeded = event => {
+            const db = event.target.result;
+            if (!db.objectStoreNames.contains(STORE_NAME)) {
+                // 以 id 作为主键，添加索引
+                const store = db.createObjectStore(STORE_NAME, { keyPath: 'id' });
+                store.createIndex('ts', 'ts', { unique: false });
+                store.createIndex('model', 'model', { unique: false });
+                store.createIndex('group', 'group', { unique: false });
+                store.createIndex('type', 'type', { unique: false });
+                store.createIndex('token_name', 'token_name', { unique: false });
+            }
+        };
+    });
+
+    async function saveLogsToDB(logs) {
+        const db = await dbPromise;
+        return new Promise((resolve, reject) => {
+            const transaction = db.transaction([STORE_NAME], 'readwrite');
+            const store = transaction.objectStore(STORE_NAME);
+
+            // 批量保存
+            logs.forEach(log => store.put(log));
+
+            transaction.oncomplete = () => resolve();
+            transaction.onerror = (e) => reject(e);
+        });
+    }
+
+    async function loadLogsFromDB() {
+        const db = await dbPromise;
+        return new Promise((resolve, reject) => {
+            const transaction = db.transaction([STORE_NAME], 'readonly');
+            const store = transaction.objectStore(STORE_NAME);
+            const request = store.getAll();
+
+            request.onsuccess = () => {
+                const data = request.result || [];
+                // 按时间戳排序
+                data.sort((a, b) => a.ts - b.ts);
+                resolve(data);
+            };
+            request.onerror = (e) => reject(e);
+        });
+    }
+
+    async function clearLogsDB() {
+        const db = await dbPromise;
+        return new Promise((resolve, reject) => {
+            const transaction = db.transaction([STORE_NAME], 'readwrite');
+            const store = transaction.objectStore(STORE_NAME);
+            const request = store.clear();
+            request.onsuccess = () => resolve();
+            request.onerror = (e) => reject(e);
+        });
+    }
+
     // --- 配色方案 ---
     const THEME = {
         night: 'rgba(100, 100, 250, 0.04)',
@@ -63,6 +128,18 @@
         .chk-label { font-size: 12px; display: flex; align-items: center; cursor: pointer; user-select: none; margin-left: 5px; }
         .chk-input { margin-right: 4px; }
 
+        /* 多选下拉框样式 */
+        .multi-select-container { position: relative; display: inline-block; }
+        .multi-select-header { padding: 4px 20px 4px 10px; font-size: 12px; border: 1px solid #d9d9d9; background: #fff; border-radius: 4px; cursor: pointer; min-width: 80px; max-width: 150px; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; }
+        .multi-select-header::after { content: "▼"; font-size: 8px; position: absolute; right: 8px; top: 50%; transform: translateY(-50%); color: #999; }
+        .multi-select-dropdown { position: absolute; top: 100%; left: 0; background: white; border: 1px solid #d9d9d9; border-radius: 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.15); z-index: 1000; max-height: 300px; overflow-y: auto; display: none; min-width: 100%; }
+        .multi-select-dropdown.show { display: block; }
+        .multi-select-option { padding: 6px 10px; display: flex; align-items: center; cursor: pointer; font-size: 12px; white-space: nowrap; }
+        .multi-select-option:hover { background: #f5f5f5; }
+        .multi-select-option input { margin-right: 8px; cursor: pointer; }
+        .multi-select-actions { display: flex; justify-content: space-between; padding: 6px 10px; border-bottom: 1px solid #eee; background: #fafafa; position: sticky; top: 0; z-index: 1; }
+        .multi-select-actions span { color: #1890ff; cursor: pointer; font-size: 12px; }
+
         @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(24,144,255,0.4); } 70% { box-shadow: 0 0 0 6px rgba(24,144,255,0); } 100% { box-shadow: 0 0 0 0 rgba(24,144,255,0); } }
         @keyframes glow { from { box-shadow: 0 0 5px #ffccc7; } to { box-shadow: 0 0 15px #ff4d4f; } }
     `;
@@ -83,11 +160,11 @@
     }
 
     // --- 数据抓取 ---
-    function scrapeData() {
+    async function scrapeData() {
         const rows = document.querySelectorAll('.semi-table-tbody tr');
         if (rows.length === 0) return false;
 
-        let hasNew = false;
+        let newLogs = [];
         rows.forEach(row => {
             const td = row.querySelectorAll('td');
             if (td.length < 9) return;
@@ -96,6 +173,7 @@
                 const timeStr = td[0].getAttribute('title') || td[0].innerText || "";
 
                 // 2. 获取其他字段
+                const token_name = td[1].innerText || "Unknown"; // 新增令牌名称
                 const group = td[2].innerText || "Default";
                 const type = td[3].innerText || "Unknown";
                 const model = td[4].innerText || "Unknown";
@@ -117,8 +195,9 @@
                     }
 
                     if (!allStoredData.find(x => x.id === id)) {
-                        allStoredData.push({ id, ts, model, cost, tokens, group, type });
-                        hasNew = true;
+                        const logEntry = { id, ts, model, cost, tokens, group, type, token_name };
+                        allStoredData.push(logEntry);
+                        newLogs.push(logEntry);
                     }
                 }
             } catch(e) {
@@ -126,13 +205,183 @@
             }
         });
 
-        if (hasNew) {
+        if (newLogs.length > 0) {
             allStoredData.sort((a, b) => a.ts - b.ts);
-            localStorage.setItem('lk_api_logs_v9', JSON.stringify(allStoredData));
+            // 保存到 IndexedDB
+            await saveLogsToDB(newLogs);
             return true;
         }
         return false;
     }
+
+    // --- 多选组件管理 ---
+    const multiSelectStates = {
+        group: { selected: new Set(), allOptions: new Set() },
+        type: { selected: new Set(), allOptions: new Set() },
+        model: { selected: new Set(), allOptions: new Set() },
+        token_name: { selected: new Set(), allOptions: new Set() }
+    };
+
+    function createMultiSelectUI(id, title, filterKey) {
+        const container = document.createElement('div');
+        container.className = 'multi-select-container';
+        container.id = `ms-container-${id}`;
+
+        const header = document.createElement('div');
+        header.className = 'multi-select-header';
+        header.id = `ms-header-${id}`;
+        header.innerText = title;
+        header.title = title;
+
+        const dropdown = document.createElement('div');
+        dropdown.className = 'multi-select-dropdown';
+        dropdown.id = `ms-dropdown-${id}`;
+
+        // Actions: 全选 / 反选
+        const actions = document.createElement('div');
+        actions.className = 'multi-select-actions';
+
+        const selectAll = document.createElement('span');
+        selectAll.innerText = '全选';
+        selectAll.onclick = (e) => {
+            e.stopPropagation();
+            multiSelectStates[filterKey].selected = new Set(multiSelectStates[filterKey].allOptions);
+            renderMultiSelectOptions(id, filterKey);
+            updateChart();
+        };
+
+        const clearAll = document.createElement('span');
+        clearAll.innerText = '清空';
+        clearAll.onclick = (e) => {
+            e.stopPropagation();
+            multiSelectStates[filterKey].selected.clear();
+            renderMultiSelectOptions(id, filterKey);
+            updateChart();
+        };
+
+        actions.appendChild(selectAll);
+        actions.appendChild(clearAll);
+        dropdown.appendChild(actions);
+
+        const optionsContainer = document.createElement('div');
+        optionsContainer.id = `ms-options-${id}`;
+        dropdown.appendChild(optionsContainer);
+
+        container.appendChild(header);
+        container.appendChild(dropdown);
+
+        // Toggle dropdown
+        header.onclick = (e) => {
+            e.stopPropagation();
+            const isShowing = dropdown.classList.contains('show');
+            // Close all other dropdowns
+            document.querySelectorAll('.multi-select-dropdown').forEach(d => d.classList.remove('show'));
+            if (!isShowing) {
+                dropdown.classList.add('show');
+            }
+        };
+
+        // Close on outside click
+        document.addEventListener('click', (e) => {
+            if (!container.contains(e.target)) {
+                dropdown.classList.remove('show');
+            }
+        });
+
+        return container;
+    }
+
+    function renderMultiSelectOptions(id, filterKey) {
+        const optionsContainer = document.getElementById(`ms-options-${id}`);
+        const header = document.getElementById(`ms-header-${id}`);
+        if (!optionsContainer || !header) return;
+
+        optionsContainer.innerHTML = '';
+        const state = multiSelectStates[filterKey];
+        const options = Array.from(state.allOptions).sort();
+
+        // 更新 Header 显示
+        if (state.selected.size === 0 || state.selected.size === state.allOptions.size) {
+            header.innerText = `全部 ${id.replace('sel-', '')}`;
+        } else if (state.selected.size === 1) {
+            header.innerText = Array.from(state.selected)[0];
+        } else {
+            header.innerText = `已选 ${state.selected.size} 项`;
+        }
+        header.title = Array.from(state.selected).join(', ');
+
+        options.forEach(opt => {
+            const div = document.createElement('div');
+            div.className = 'multi-select-option';
+
+            const checkbox = document.createElement('input');
+            checkbox.type = 'checkbox';
+            checkbox.checked = state.selected.size === 0 ? true : state.selected.has(opt); // 空表示全选
+
+            // 修复：如果之前为空，点击后应该只选中当前项
+            checkbox.onchange = (e) => {
+                if (state.selected.size === 0 && !e.target.checked) {
+                    // Originally all selected (implicitly), now unselecting one
+                    state.selected = new Set(state.allOptions);
+                    state.selected.delete(opt);
+                } else if (e.target.checked) {
+                    state.selected.add(opt);
+                } else {
+                    state.selected.delete(opt);
+                }
+
+                // Sync header text
+                renderMultiSelectOptions(id, filterKey);
+                updateChart();
+            };
+
+            const label = document.createElement('span');
+            label.innerText = opt;
+
+            div.onclick = (e) => {
+                if(e.target !== checkbox) checkbox.click();
+            };
+
+            div.appendChild(checkbox);
+            div.appendChild(label);
+            optionsContainer.appendChild(div);
+        });
+    }
+
+    function updateMultiSelectData(data) {
+        let needsUpdate = false;
+
+        const processKey = (filterKey) => {
+            const state = multiSelectStates[filterKey];
+            const currentSize = state.allOptions.size;
+            data.forEach(d => {
+                if (d[filterKey]) state.allOptions.add(d[filterKey]);
+            });
+            if (state.allOptions.size > currentSize) {
+                needsUpdate = true;
+                // 新增选项默认选中
+                data.forEach(d => {
+                    if (d[filterKey] && state.selected.size > 0 && !state.selected.has(d[filterKey])) {
+                        // 如果用户已经进行了筛选，新选项不一定自动勾选。但为了方便，通常默认勾选或者不干扰当前。
+                        // 策略：如果 selected == allOptions，保持同步
+                    }
+                });
+            }
+        };
+
+        processKey('group');
+        processKey('type');
+        processKey('model');
+        processKey('token_name');
+
+        if (needsUpdate) {
+            renderMultiSelectOptions('sel-group', 'group');
+            renderMultiSelectOptions('sel-type', 'type');
+            renderMultiSelectOptions('sel-model', 'model');
+            renderMultiSelectOptions('sel-token', 'token_name');
+        }
+    }
+
 
     // --- 自动翻页 ---
     async function startCrawling() {
@@ -144,9 +393,9 @@
         btn.classList.add('btn-anim');
         for (let i = 0; i < 300; i++) { // Max 300 pages
             if (!isCrawling) break;
-            scrapeData();
-            updateChart();
-            // 更新选择器以匹配 li 标签按钮
+            const hasNew = await scrapeData();
+            if (hasNew) updateChart();
+
             const nextBtn = document.querySelector('.semi-page-next:not(.semi-page-disabled)');
             if (!nextBtn) break;
             nextBtn.click();
@@ -185,7 +434,9 @@
 
         if (qBtn) {
             qBtn.click();
-            setTimeout(() => { if(scrapeData()) updateChart(); }, 2000);
+            setTimeout(async () => {
+                if(await scrapeData()) updateChart();
+            }, 2000);
         }
     }
 
@@ -210,13 +461,16 @@
     }
 
     // --- UI 初始化 ---
-    function initUI() {
+    async function initUI() {
         if (document.getElementById('ai-dashboard-root')) return;
 
+        // 从 IndexedDB 加载历史数据
         try {
-            const raw = localStorage.getItem('lk_api_logs_v9');
-            if (raw) allStoredData = JSON.parse(raw);
-        } catch(e) { allStoredData = []; }
+            allStoredData = await loadLogsFromDB();
+        } catch(e) {
+            console.error("Failed to load logs from DB:", e);
+            allStoredData = [];
+        }
 
         const wrapper = document.createElement('div');
         wrapper.id = 'ai-lab-wrapper';
@@ -227,10 +481,10 @@
                         <span style="font-size:16px; font-weight:bold;">💎 灵客 API 旗舰看板 V10</span>
                         <span id="monitor-status" style="display:none; color:#52c41a; font-size:12px; margin-left:10px;">● 监控中</span>
                     </div>
-                    <div style="font-size:12px; color:#888;">数据点: <span id="data-count">0</span></div>
+                    <div style="font-size:12px; color:#888;">数据点: <span id="data-count">${allStoredData.length}</span></div>
                 </div>
 
-                <div class="ctrl-bar">
+                <div class="ctrl-bar" id="main-ctrl-bar">
                     <button id="btn-monitor" class="u-btn">🚀 自动更新</button>
                     <button id="btn-crawl" class="u-btn">📥 抓取历史</button>
 
@@ -242,21 +496,19 @@
                     </select>
 
                     <select id="sel-precision" class="u-btn">
-                        <option value="raw">原始精度</option>
+                        <option value="raw" selected>原始精度</option>
                         <option value="60000">1分钟聚合</option>
-                        <option value="3600000" selected>1小时聚合</option>
+                        <option value="3600000">1小时聚合</option>
                     </select>
 
                     <select id="sel-type-chart" class="u-btn">
                         <option value="bar">分段消耗 (柱)</option>
-                        <option value="line">累计消耗 (线)</option>
+                        <option value="line" selected>累计消耗 (线)</option>
                     </select>
 
                     <span style="border-left:1px solid #ccc; margin:0 4px; height:15px;"></span>
 
-                    <select id="sel-group" class="u-btn" style="max-width: 100px;"><option value="all">全部分组</option></select>
-                    <select id="sel-type" class="u-btn" style="max-width: 100px;"><option value="all">全部类型</option></select>
-                    <select id="sel-model" class="u-btn" style="max-width: 120px;"><option value="all">全部模型</option></select>
+                    <!-- 多选框将被注入到这里 -->
 
                     <button id="btn-clear" class="u-btn btn-danger" style="margin-left:auto;">清空</button>
                 </div>
@@ -293,6 +545,15 @@
         const container = document.querySelector('.semi-layout-content') || document.body;
         container.prepend(wrapper);
 
+        // 注入多选框
+        const ctrlBar = document.getElementById('main-ctrl-bar');
+        const clearBtn = document.getElementById('btn-clear');
+
+        ctrlBar.insertBefore(createMultiSelectUI('sel-token', '令牌名称', 'token_name'), clearBtn);
+        ctrlBar.insertBefore(createMultiSelectUI('sel-group', '分组', 'group'), clearBtn);
+        ctrlBar.insertBefore(createMultiSelectUI('sel-type', '类型', 'type'), clearBtn);
+        ctrlBar.insertBefore(createMultiSelectUI('sel-model', '模型', 'model'), clearBtn);
+
         chartInstance = echarts.init(document.getElementById('main-chart'));
         window.addEventListener('resize', () => chartInstance.resize());
 
@@ -300,35 +561,30 @@
         document.getElementById('btn-monitor').onclick = toggleMonitor;
         document.getElementById('btn-crawl').onclick = startCrawling;
         document.getElementById('btn-rec').onclick = toggleRecording;
-        document.getElementById('btn-clear').onclick = () => { if(confirm('清空数据?')) { allStoredData=[]; localStorage.removeItem('lk_api_logs_v9'); updateChart(); }};
+        document.getElementById('btn-clear').onclick = async () => {
+            if(confirm('清空所有历史数据? 这将无法恢复！')) {
+                allStoredData=[];
+                await clearLogsDB();
 
-        ['sel-y-scale', 'sel-precision', 'sel-type-chart', 'sel-model', 'sel-group', 'sel-type'].forEach(id => {
+                // 清空多选状态
+                ['token_name', 'group', 'type', 'model'].forEach(k => {
+                    multiSelectStates[k].allOptions.clear();
+                    multiSelectStates[k].selected.clear();
+                });
+                updateMultiSelectData([]);
+                updateChart();
+            }
+        };
+
+        ['sel-y-scale', 'sel-precision', 'sel-type-chart'].forEach(id => {
             document.getElementById(id).onchange = updateChart;
         });
 
-        scrapeData();
+        await scrapeData();
+        updateMultiSelectData(allStoredData);
         updateChart();
     }
 
-    // --- 辅助函数：更新下拉框选项 ---
-    function updateSelectOptions(id, data, key) {
-        const sel = document.getElementById(id);
-        const currentVal = sel.value;
-        const options = new Set(data.map(d => d[key]).filter(v => v));
-
-        // 检查是否有新选项
-        let hasNew = false;
-        options.forEach(opt => {
-            let exists = false;
-            for(let i=0; i<sel.options.length; i++) {
-                if(sel.options[i].value === opt) { exists = true; break; }
-            }
-            if(!exists) {
-                sel.add(new Option(opt, opt));
-                hasNew = true;
-            }
-        });
-    }
 
     // --- 图表渲染 ---
     function updateChart() {
@@ -340,21 +596,20 @@
         const yScaleType = document.getElementById('sel-y-scale').value; // 'value' or 'log'
         const followRecording = document.getElementById('chk-follow').checked;
 
-        // 过滤器
-        const modelFilter = document.getElementById('sel-model').value;
-        const groupFilter = document.getElementById('sel-group').value;
-        const typeFilter = document.getElementById('sel-type').value;
+        updateMultiSelectData(allStoredData);
 
-        // 更新下拉框
-        updateSelectOptions('sel-model', allStoredData, 'model');
-        updateSelectOptions('sel-group', allStoredData, 'group');
-        updateSelectOptions('sel-type', allStoredData, 'type');
+        // 辅助检查函数，空集合代表全选
+        const isSelected = (key, val) => {
+            const selectedSet = multiSelectStates[key].selected;
+            return selectedSet.size === 0 || selectedSet.has(val);
+        };
 
         // 应用过滤
         const filtered = allStoredData.filter(d => {
-            if (modelFilter !== 'all' && d.model !== modelFilter) return false;
-            if (groupFilter !== 'all' && d.group !== groupFilter) return false;
-            if (typeFilter !== 'all' && d.type !== typeFilter) return false;
+            if (!isSelected('token_name', d.token_name)) return false;
+            if (!isSelected('model', d.model)) return false;
+            if (!isSelected('group', d.group)) return false;
+            if (!isSelected('type', d.type)) return false;
             return true;
         });
 
@@ -455,7 +710,7 @@
         // --- 统计计算 ---
         // 1. 录制面板统计
         if (isRecording) {
-            const recData = allStoredData.filter(d => d.ts >= recordingStartTime);
+            const recData = filtered.filter(d => d.ts >= recordingStartTime);
             const rCost = recData.reduce((a,b)=>a+b.cost,0);
             const rTimeMin = Math.max((Date.now() - recordingStartTime)/60000, 0.01); // 分钟数
             const rPeak = Math.max(...recData.map(d=>d.cost), 0);
@@ -467,19 +722,19 @@
         }
 
         // 2. 选区统计 (View)
-        updateViewStats();
+        updateViewStats(filtered);
         chartInstance.off('datazoom');
-        chartInstance.on('datazoom', updateViewStats);
+        chartInstance.on('datazoom', () => updateViewStats(filtered));
     }
 
-    function updateViewStats() {
+    function updateViewStats(filteredData) {
         const opt = chartInstance.getOption();
         if(!opt.dataZoom) return;
         const sv = opt.dataZoom[0].startValue; // Time Axis 返回的是时间戳
         const ev = opt.dataZoom[0].endValue;
 
         let sum = 0, count = 0, toks = 0;
-        allStoredData.forEach(d => {
+        filteredData.forEach(d => {
             if (d.ts >= sv && d.ts <= ev) {
                 sum += d.cost;
                 count++;
