@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "灵客API旗舰看板",
+  "version": "1.0.0",
+  "description": "灵客API日志数据增强、本地存储与高级图表分析插件 (V10架构)。支持全量缓存、外层时间轴截取、多维交叉筛选。",
+  "author": "Jules",
+  "permissions": [
+    "storage"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["*://lingkeapi.com/console/log*"],
+      "css": ["content.css"],
+      "js": ["lib/echarts.min.js", "content.js"],
+      "run_at": "document_end"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "灵客API控制面板"
+  },
+  "icons": {
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}
